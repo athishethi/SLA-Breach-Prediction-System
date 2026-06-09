@@ -6,3 +6,4 @@ groq
 python-dotenv
 boto3
 pytz
+twilio

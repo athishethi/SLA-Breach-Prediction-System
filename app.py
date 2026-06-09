@@ -5,7 +5,9 @@ import pytz
 import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
 
-from src.llm_service import analyze_ticket
+from twilio_alert import send_sla_sms_alert
+
+from src.llm_service import analyze_ticket, generate_risk_reason
 from src.sla_engine import get_sla_hours, calculate_deadline
 from src.dynamodb_service import (
     save_ticket_to_db,
@@ -16,6 +18,9 @@ from src.dynamodb_service import (
 IST = pytz.timezone("Asia/Kolkata")
 
 st.set_page_config(page_title="SLA Breach Predictor", layout="wide")
+
+if "sent_alerts" not in st.session_state:
+    st.session_state.sent_alerts = set()
 
 
 def load_tickets():
@@ -70,6 +75,23 @@ def create_ticket(customer_name, comment):
     }
 
     save_ticket(ticket)
+
+    try:
+        score = int(complexity_score)
+    except:
+        score = 0
+
+    if str(priority).lower() == "critical" or score >= 4:
+        try:
+            send_sla_sms_alert(
+                customer_name=customer_name,
+                ticket_id=ticket["ticket_id"],
+                minutes_left=int(sla_hours * 60),
+                risk_level=f"Priority={priority}, Complexity={complexity_score}"
+            )
+        except Exception as e:
+            st.warning(f"SMS alert failed: {e}")
+
     return ticket
 
 
@@ -101,6 +123,27 @@ def prepare_dashboard_data():
         df["remaining_minutes"] = df["sla_deadline"].apply(calculate_remaining_minutes)
         df["risk_status"] = df.apply(get_risk_status, axis=1)
 
+        for _, row in df.iterrows():
+            if row["status"] in ["Resolved", "Closed"]:
+                continue
+
+            if 0 < row["remaining_minutes"] <= 60:
+                alert_key = f"{row['ticket_id']}_countdown"
+
+                if alert_key not in st.session_state.sent_alerts:
+                    try:
+                        send_sla_sms_alert(
+                            customer_name=row["customer_name"],
+                            ticket_id=row["ticket_id"],
+                            minutes_left=row["remaining_minutes"],
+                            risk_level="CRITICAL COUNTDOWN"
+                        )
+
+                        st.session_state.sent_alerts.add(alert_key)
+
+                    except Exception:
+                        pass
+
     return df
 
 
@@ -114,6 +157,10 @@ def color_risk_status(row):
     return [""] * len(row)
 
 
+def color_completed_table(row):
+    return ["background-color: lightgreen; color: black"] * len(row)
+
+
 def get_allowed_status_options(current_status):
     if current_status == "Open":
         return ["In Progress", "Resolved", "Closed"]
@@ -122,6 +169,18 @@ def get_allowed_status_options(current_status):
         return ["Resolved", "Closed"]
 
     return []
+
+
+@st.cache_data(ttl=600)
+def get_ai_risk_reason(ticket_id, comment, complexity_score, remaining_minutes):
+    try:
+        return generate_risk_reason(
+            comment,
+            complexity_score,
+            remaining_minutes
+        )
+    except Exception:
+        return "Unable to generate AI reason right now."
 
 
 def show_critical_alerts(df):
@@ -137,14 +196,12 @@ def show_critical_alerts(df):
         st.sidebar.success("No critical alerts")
     else:
         for _, row in critical_df.iterrows():
-            if row["remaining_minutes"] < 0:
-                reason = "SLA already breached"
-            elif row["remaining_minutes"] < 30:
-                reason = "Less than 30 minutes to complete"
-            elif int(row["complexity_score"]) > 4:
-                reason = "High complexity issue may affect many users"
-            else:
-                reason = "Close to SLA breach"
+            reason = get_ai_risk_reason(
+                row["ticket_id"],
+                row["comment"],
+                int(row["complexity_score"]),
+                int(row["remaining_minutes"])
+            )
 
             st.sidebar.error(f"{row['ticket_id']} - {reason}")
 
@@ -173,7 +230,11 @@ def upload_csv_to_dynamodb(uploaded_file):
 
 
 st.sidebar.title("SLA Predictor")
-page = st.sidebar.radio("Navigation", ["Create Ticket", "Dashboard"])
+
+page = st.sidebar.radio(
+    "Navigation",
+    ["Create Ticket", "Dashboard", "Resolved / Closed Tickets"]
+)
 
 
 if page == "Create Ticket":
@@ -350,3 +411,40 @@ elif page == "Dashboard":
             )
 
             st.plotly_chart(fig_risk, use_container_width=True)
+
+
+elif page == "Resolved / Closed Tickets":
+    st.title("Resolved / Closed Ticket Records")
+
+    df = prepare_dashboard_data()
+
+    if df.empty:
+        st.info("No tickets available.")
+    else:
+        completed_df = df[df["status"].isin(["Resolved", "Closed"])]
+
+        if completed_df.empty:
+            st.success("No resolved or closed tickets available.")
+        else:
+            st.metric("Resolved / Closed Tickets", len(completed_df))
+
+            display_columns = [
+                "ticket_id",
+                "customer_name",
+                "comment",
+                "created_at",
+                "status",
+                "priority",
+                "complexity_score",
+                "sla_hours",
+                "sla_deadline",
+                "remaining_minutes",
+                "risk_status"
+            ]
+
+            styled_completed_df = completed_df[display_columns].style.apply(
+                color_completed_table,
+                axis=1
+            )
+
+            st.dataframe(styled_completed_df, use_container_width=True)

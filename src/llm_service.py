@@ -17,6 +17,7 @@ def get_secret(key):
 client = Groq(api_key=get_secret("GROQ_API_KEY"))
 
 
+
 def get_priority_from_complexity(score):
     if score == 5:
         return "Critical"
@@ -108,3 +109,38 @@ Output ONLY a single number (1, 2, 3, 4, or 5) with no additional text, explanat
     priority = get_priority_from_complexity(complexity_score)
 
     return priority, complexity_score
+
+def generate_risk_reason(comment, complexity_score, remaining_minutes):
+    
+    prompt = f"""
+    You are an SLA Risk Analyst.
+
+    Ticket Comment:
+    {comment}
+
+    Complexity Score:
+    {complexity_score}
+
+    Remaining SLA Minutes:
+    {remaining_minutes}
+
+    Explain in ONE SHORT sentence why this ticket is considered high risk.
+
+    Examples:
+
+    - Database outage affecting multiple customers.
+    - Critical payment failure impacting transactions.
+    - Only 15 minutes remain before SLA deadline.
+    - Authentication issue blocking user access.
+    - High complexity issue requiring multiple teams.
+
+    Return only the reason.
+    """
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    return response.choices[0].message.content.strip()
