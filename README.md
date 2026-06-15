@@ -464,7 +464,7 @@ AI-Powered-SLA-Breach-Prediction-System/
 
 # 🚀 Future Enhancements
 
-- Email Alert Integration
+- Email,SMS Alert Integration
 - Multi-Agent AI Architecture
 - Root Cause Analysis
 - SLA Forecasting
